@@ -1,0 +1,12 @@
+/orchard
+*.exe
+*.wasm
+!frontend/public/orchard.wasm
+/frontend/node_modules/
+/frontend/dist/
+/internal/web/dist/
+.env
+*.db
+*.sqlite
+/data/
+.validate-stack.env

@@ -1,0 +1,53 @@
+services:
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        ORCHARD_API_URL: http://orchard:3000
+    ports:
+      - "3001:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: http://orchard:3000
+    depends_on:
+      orchard:
+        condition: service_started
+    restart: unless-stopped
+
+  orchard:
+    build: .
+    ports:
+      - "3002:3000"
+    environment:
+      ORCHARD_DB_DRIVER: postgres
+      ORCHARD_DB_DSN: postgres://orchard:orchard@postgres:5432/orchard?sslmode=disable
+      ORCHARD_STORAGE_PATH: /data/repos
+      # Local/dev fallback secret satisfies startup validation.
+      ORCHARD_JWT_SECRET: ${ORCHARD_JWT_SECRET:-dev-jwt-secret-change-this}
+      ORCHARD_CORS_ALLOW_ORIGINS: http://localhost:3001
+      ORCHARD_WEBAUTHN_ORIGIN: http://localhost:3001
+    volumes:
+      - repo-data:/data/repos
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: orchard
+      POSTGRES_PASSWORD: orchard
+      POSTGRES_DB: orchard
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orchard"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  pg-data:
+  repo-data:

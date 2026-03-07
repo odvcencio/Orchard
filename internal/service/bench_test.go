@@ -1,0 +1,560 @@
+package service
+
+import (
+	"context"
+	"fmt"
+	"path/filepath"
+	"strconv"
+	"testing"
+	"time"
+
+	"github.com/odvcencio/graft/pkg/object"
+	"github.com/odvcencio/orchard/internal/database"
+	"github.com/odvcencio/orchard/internal/graftstore"
+	"github.com/odvcencio/orchard/internal/models"
+	"github.com/odvcencio/gts-suite/pkg/model"
+	"github.com/odvcencio/gts-suite/pkg/query"
+	"github.com/odvcencio/gts-suite/pkg/xref"
+)
+
+var (
+	benchmarkSymbolResultsSink  []SymbolResult
+	benchmarkImpactDefsSink     []xref.Definition
+	benchmarkImpactCallersSink  []ImpactDirectCaller
+	benchmarkMergeBaseSink      object.Hash
+	benchmarkCodeIntelIndexSink *model.Index
+)
+
+type benchmarkLinearCodeIntelCacheEntry struct {
+	index      *model.Index
+	lastAccess time.Time
+}
+
+type benchmarkLinearCodeIntelCache struct {
+	items    map[string]benchmarkLinearCodeIntelCacheEntry
+	maxItems int
+}
+
+func (c *benchmarkLinearCodeIntelCache) set(key string, idx *model.Index) {
+	if c.items == nil {
+		c.items = make(map[string]benchmarkLinearCodeIntelCacheEntry)
+	}
+	c.items[key] = benchmarkLinearCodeIntelCacheEntry{
+		index:      idx,
+		lastAccess: time.Now(),
+	}
+	if c.maxItems <= 0 {
+		return
+	}
+	for len(c.items) > c.maxItems {
+		oldestKey := ""
+		var oldest time.Time
+		for candidateKey, entry := range c.items {
+			if oldestKey == "" || entry.lastAccess.Before(oldest) {
+				oldestKey = candidateKey
+				oldest = entry.lastAccess
+			}
+		}
+		if oldestKey == "" {
+			break
+		}
+		delete(c.items, oldestKey)
+	}
+}
+
+type benchmarkLinearCodeIntelBloomCacheEntry struct {
+	filter     *symbolSearchBloomFilter
+	lastAccess time.Time
+}
+
+type benchmarkLinearCodeIntelBloomCache struct {
+	items    map[string]benchmarkLinearCodeIntelBloomCacheEntry
+	maxItems int
+}
+
+func (c *benchmarkLinearCodeIntelBloomCache) set(key string, filter *symbolSearchBloomFilter) {
+	if c.items == nil {
+		c.items = make(map[string]benchmarkLinearCodeIntelBloomCacheEntry)
+	}
+	c.items[key] = benchmarkLinearCodeIntelBloomCacheEntry{
+		filter:     filter,
+		lastAccess: time.Now(),
+	}
+	if c.maxItems <= 0 {
+		return
+	}
+	for len(c.items) > c.maxItems {
+		oldestKey := ""
+		var oldest time.Time
+		for candidateKey, entry := range c.items {
+			if oldestKey == "" || entry.lastAccess.Before(oldest) {
+				oldestKey = candidateKey
+				oldest = entry.lastAccess
+			}
+		}
+		if oldestKey == "" {
+			break
+		}
+		delete(c.items, oldestKey)
+	}
+}
+
+func BenchmarkCodeIntelCacheSetAndGet(b *testing.B) {
+	svc := &CodeIntelService{
+		indexes:       make(map[string]*codeIntelCacheEntry),
+		cacheMaxItems: 4096,
+		cacheTTL:      time.Hour,
+	}
+	idx := &model.Index{}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		key := "acme/repo@" + strconv.Itoa(i%2048)
+		svc.setCachedIndex(key, idx)
+		_, _ = svc.getCachedIndex(key)
+	}
+}
+
+func BenchmarkCodeIntelCacheHitLookup(b *testing.B) {
+	svc := &CodeIntelService{
+		indexes:       make(map[string]*codeIntelCacheEntry),
+		cacheMaxItems: 8192,
+		cacheTTL:      time.Hour,
+	}
+	idx := &model.Index{}
+	for i := 0; i < 4096; i++ {
+		svc.setCachedIndex("acme/repo@"+strconv.Itoa(i), idx)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = svc.getCachedIndex("acme/repo@" + strconv.Itoa(i%4096))
+	}
+}
+
+func BenchmarkCodeIntelCacheSetWithEvictionLinearScan(b *testing.B) {
+	cache := &benchmarkLinearCodeIntelCache{
+		items:    make(map[string]benchmarkLinearCodeIntelCacheEntry),
+		maxItems: 128,
+	}
+	idx := &model.Index{}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		cache.set("acme/repo@"+strconv.Itoa(i), idx)
+	}
+}
+
+func BenchmarkCodeIntelCacheSetWithEvictionHeap(b *testing.B) {
+	svc := &CodeIntelService{
+		indexes:       make(map[string]*codeIntelCacheEntry),
+		cacheMaxItems: 128,
+		cacheTTL:      time.Hour,
+	}
+	idx := &model.Index{}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		svc.setCachedIndex("acme/repo@"+strconv.Itoa(i), idx)
+	}
+}
+
+func BenchmarkCodeIntelSymbolBloomCacheSetWithEvictionHeap(b *testing.B) {
+	svc := &CodeIntelService{
+		symbolBlooms:  make(map[string]*codeIntelBloomCacheEntry),
+		cacheMaxItems: 128,
+		cacheTTL:      time.Hour,
+	}
+	filter := buildSymbolSearchBloomFromEntries(nil)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		svc.setCachedSymbolBloom("42@"+strconv.Itoa(i), filter)
+	}
+}
+
+func BenchmarkCodeIntelSymbolBloomCacheSetWithEvictionLinearScan(b *testing.B) {
+	cache := &benchmarkLinearCodeIntelBloomCache{
+		items:    make(map[string]benchmarkLinearCodeIntelBloomCacheEntry),
+		maxItems: 128,
+	}
+	filter := buildSymbolSearchBloomFromEntries(nil)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		cache.set("42@"+strconv.Itoa(i), filter)
+	}
+}
+
+func BenchmarkMergePreviewCacheSetAndGet(b *testing.B) {
+	svc := &PRService{
+		mergePreviewCache: make(map[string]*mergePreviewCacheEntry),
+	}
+	resp := &MergePreviewResponse{
+		Files: []FileMergeInfo{
+			{Path: "main.go", Status: "clean"},
+		},
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		key := "pr/" + strconv.Itoa(i%1024)
+		svc.setCachedMergePreview(key, resp)
+		_, _ = svc.getCachedMergePreview(key)
+	}
+}
+
+func BenchmarkCodeIntelSymbolSearchContains(b *testing.B) {
+	idx := benchmarkCodeIntelIndex(64, 24)
+	queryText := "processorder"
+
+	initial := searchSymbolsFromIndexWithContains(idx, queryText)
+	if len(initial) == 0 {
+		b.Fatal("expected symbol search fixture to produce matches")
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		benchmarkSymbolResultsSink = searchSymbolsFromIndexWithContains(idx, queryText)
+	}
+}
+
+func BenchmarkCodeIntelSymbolSearchSelector(b *testing.B) {
+	idx := benchmarkCodeIntelIndex(64, 24)
+	sel, err := query.ParseSelector("*[name=/^ProcessOrder$/]")
+	if err != nil {
+		b.Fatalf("parse selector: %v", err)
+	}
+
+	initial := searchSymbolsFromIndexWithSelector(idx, sel)
+	if len(initial) == 0 {
+		b.Fatal("expected selector fixture to produce matches")
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		benchmarkSymbolResultsSink = searchSymbolsFromIndexWithSelector(idx, sel)
+	}
+}
+
+func BenchmarkCodeIntelIndexBuildFullVsIncremental(b *testing.B) {
+	_, prSvc, store, _ := setupPRMergeBenchmarkService(b)
+	browseSvc := NewBrowseService(prSvc.repoSvc)
+	codeIntelSvc := NewCodeIntelService(prSvc.db, prSvc.repoSvc, browseSvc)
+
+	parentFiles := benchmarkSyntheticGoFiles(512)
+	parent := writeBenchmarkCommitWithFiles(b, store, parentFiles, nil, "base", 1700003000)
+
+	commitFiles := cloneBenchmarkSyntheticFiles(parentFiles)
+	commitFiles["pkg000/file000.go"] = "package pkg000\n\nfunc Helper000() int { return 9000 }\n"
+	commit := writeBenchmarkCommitWithFiles(b, store, commitFiles, []object.Hash{parent}, "head", 1700003010)
+
+	parentCommit, err := store.Objects.ReadCommit(parent)
+	if err != nil {
+		b.Fatalf("read parent commit: %v", err)
+	}
+	commitObj, err := store.Objects.ReadCommit(commit)
+	if err != nil {
+		b.Fatalf("read head commit: %v", err)
+	}
+
+	parentIndex, err := codeIntelSvc.buildIndexFromStore(store, parent, "bench/repo")
+	if err != nil {
+		b.Fatalf("build parent index: %v", err)
+	}
+
+	fullResult, err := codeIntelSvc.buildIndexFromStore(store, commit, "bench/repo")
+	if err != nil {
+		b.Fatalf("build full index fixture: %v", err)
+	}
+	incrementalResult, err := codeIntelSvc.buildIndexIncrementalFromParent(store, commit, commitObj.TreeHash, parentCommit.TreeHash, parentIndex, "bench/repo")
+	if err != nil {
+		b.Fatalf("build incremental index fixture: %v", err)
+	}
+	if fullResult.FileCount() != incrementalResult.FileCount() {
+		b.Fatalf("fixture mismatch: full file_count=%d incremental file_count=%d", fullResult.FileCount(), incrementalResult.FileCount())
+	}
+	if fullResult.SymbolCount() != incrementalResult.SymbolCount() {
+		b.Fatalf("fixture mismatch: full symbol_count=%d incremental symbol_count=%d", fullResult.SymbolCount(), incrementalResult.SymbolCount())
+	}
+	if len(fullResult.Errors) != len(incrementalResult.Errors) {
+		b.Fatalf("fixture mismatch: full errors=%d incremental errors=%d", len(fullResult.Errors), len(incrementalResult.Errors))
+	}
+
+	b.Run("full_rebuild", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			idx, err := codeIntelSvc.buildIndexFromStore(store, commit, "bench/repo")
+			if err != nil {
+				b.Fatalf("full rebuild: %v", err)
+			}
+			benchmarkCodeIntelIndexSink = idx
+		}
+	})
+
+	b.Run("incremental", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			idx, err := codeIntelSvc.buildIndexIncrementalFromParent(store, commit, commitObj.TreeHash, parentCommit.TreeHash, parentIndex, "bench/repo")
+			if err != nil {
+				b.Fatalf("incremental rebuild: %v", err)
+			}
+			benchmarkCodeIntelIndexSink = idx
+		}
+	})
+}
+
+func BenchmarkImpactAnalysisPreparationFromGraph(b *testing.B) {
+	graph := benchmarkImpactGraph(512, 4)
+	symbol := "ProcessOrder"
+
+	defs := findImpactDefinitionsFromGraph(graph, symbol)
+	if len(defs) == 0 {
+		b.Fatal("expected impact fixture to produce definitions")
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		benchmarkImpactDefsSink = findImpactDefinitionsFromGraph(graph, symbol)
+		benchmarkImpactCallersSink = collectDirectCallersFromGraph(graph, benchmarkImpactDefsSink)
+	}
+}
+
+func BenchmarkPRMergeBaseLookupCacheHit(b *testing.B) {
+	ctx, prSvc, store, repo := setupPRMergeBenchmarkService(b)
+
+	root := writeBenchmarkMainCommit(b, store, "package main\n\nfunc V() int { return 0 }\n", nil, "root", 1700001000)
+	left := writeBenchmarkMainCommit(b, store, "package main\n\nfunc V() int { return 1 }\n", []object.Hash{root}, "left", 1700001010)
+	right := writeBenchmarkMainCommit(b, store, "package main\n\nfunc V() int { return 2 }\n", []object.Hash{root}, "right", 1700001020)
+	base, err := FindMergeBase(store.Objects, left, right)
+	if err != nil {
+		b.Fatalf("find merge base: %v", err)
+	}
+	if err := prSvc.db.SetMergeBaseCache(ctx, repo.ID, string(left), string(right), string(base)); err != nil {
+		b.Fatalf("seed merge-base cache: %v", err)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		resolved, err := prSvc.findMergeBaseCached(ctx, repo.ID, store.Objects, left, right)
+		if err != nil {
+			b.Fatalf("findMergeBaseCached: %v", err)
+		}
+		benchmarkMergeBaseSink = resolved
+	}
+	if benchmarkMergeBaseSink != base {
+		b.Fatalf("cached merge base = %s, want %s", benchmarkMergeBaseSink, base)
+	}
+}
+
+func benchmarkCodeIntelIndex(fileCount, symbolsPerFile int) *model.Index {
+	idx := &model.Index{
+		Version: "0.1.0",
+		Files:   make([]model.FileSummary, 0, fileCount),
+	}
+	for fileNum := 0; fileNum < fileCount; fileNum++ {
+		symbols := make([]model.Symbol, 0, symbolsPerFile)
+		for symNum := 0; symNum < symbolsPerFile; symNum++ {
+			name := fmt.Sprintf("Helper%d_%d", fileNum, symNum)
+			if symNum%17 == 0 {
+				name = "ProcessOrder"
+			}
+			symbols = append(symbols, model.Symbol{
+				Name:      name,
+				Kind:      "function",
+				Signature: fmt.Sprintf("func %s()", name),
+				StartLine: symNum*3 + 1,
+				EndLine:   symNum*3 + 2,
+			})
+		}
+		idx.Files = append(idx.Files, model.FileSummary{
+			Path:     fmt.Sprintf("pkg%03d/main.go", fileNum),
+			Language: "go",
+			Symbols:  symbols,
+		})
+	}
+	return idx
+}
+
+func benchmarkImpactGraph(definitionCount, fanIn int) xref.Graph {
+	defs := make([]xref.Definition, 0, definitionCount)
+	for i := 0; i < definitionCount; i++ {
+		name := fmt.Sprintf("Helper%d", i)
+		if i%64 == 0 {
+			name = "ProcessOrder"
+		}
+		defs = append(defs, xref.Definition{
+			ID:        fmt.Sprintf("def-%04d", i),
+			File:      fmt.Sprintf("pkg%03d/main.go", i%32),
+			Package:   fmt.Sprintf("pkg%03d", i%32),
+			Kind:      "function",
+			Name:      name,
+			Signature: fmt.Sprintf("func %s()", name),
+			StartLine: i*2 + 1,
+			EndLine:   i*2 + 2,
+			Callable:  true,
+		})
+	}
+
+	edges := make([]xref.Edge, 0, definitionCount*fanIn)
+	for i := 0; i < definitionCount; i++ {
+		callee := defs[i]
+		for j := 1; j <= fanIn; j++ {
+			caller := defs[(i+j)%definitionCount]
+			if caller.ID == callee.ID {
+				continue
+			}
+			edges = append(edges, xref.Edge{
+				Caller:     caller,
+				Callee:     callee,
+				Resolution: "static",
+				Count:      1 + (j % 3),
+			})
+		}
+	}
+
+	return xref.Graph{
+		Root:        "bench",
+		Definitions: defs,
+		Edges:       edges,
+	}
+}
+
+func setupPRMergeBenchmarkService(b *testing.B) (context.Context, *PRService, *gotstore.RepoStore, *models.Repository) {
+	b.Helper()
+
+	ctx := context.Background()
+	tmpDir := b.TempDir()
+
+	db, err := database.OpenSQLite(filepath.Join(tmpDir, "bench.db"))
+	if err != nil {
+		b.Fatalf("open sqlite: %v", err)
+	}
+	b.Cleanup(func() {
+		_ = db.Close()
+	})
+
+	if err := db.Migrate(ctx); err != nil {
+		b.Fatalf("migrate sqlite: %v", err)
+	}
+
+	user := &models.User{
+		Username:     "bench",
+		Email:        "bench@example.com",
+		PasswordHash: "x",
+	}
+	if err := db.CreateUser(ctx, user); err != nil {
+		b.Fatalf("create benchmark user: %v", err)
+	}
+
+	repoSvc := NewRepoService(db, filepath.Join(tmpDir, "repos"))
+	repo, err := repoSvc.Create(ctx, user.ID, "repo", "", false)
+	if err != nil {
+		b.Fatalf("create benchmark repository: %v", err)
+	}
+	store, err := repoSvc.OpenStore(ctx, "bench", "repo")
+	if err != nil {
+		b.Fatalf("open repository store: %v", err)
+	}
+
+	prSvc := NewPRService(db, repoSvc, nil)
+	return ctx, prSvc, store, repo
+}
+
+func writeBenchmarkMainCommit(b *testing.B, store *gotstore.RepoStore, content string, parents []object.Hash, message string, ts int64) object.Hash {
+	b.Helper()
+
+	blobHash, err := store.Objects.WriteBlob(&object.Blob{Data: []byte(content)})
+	if err != nil {
+		b.Fatalf("write blob: %v", err)
+	}
+	treeHash, err := store.Objects.WriteTree(&object.TreeObj{
+		Entries: []object.TreeEntry{
+			{
+				Name:     "main.go",
+				BlobHash: blobHash,
+			},
+		},
+	})
+	if err != nil {
+		b.Fatalf("write tree: %v", err)
+	}
+	commitHash, err := store.Objects.WriteCommit(&object.CommitObj{
+		TreeHash:  treeHash,
+		Parents:   parents,
+		Author:    "bench",
+		Timestamp: ts,
+		Message:   message,
+	})
+	if err != nil {
+		b.Fatalf("write commit: %v", err)
+	}
+	return commitHash
+}
+
+func writeBenchmarkCommitWithFiles(
+	b *testing.B,
+	store *gotstore.RepoStore,
+	files map[string]string,
+	parents []object.Hash,
+	message string,
+	ts int64,
+) object.Hash {
+	b.Helper()
+
+	blobHashes := make(map[string]object.Hash, len(files))
+	for path, content := range files {
+		blobHash, err := store.Objects.WriteBlob(&object.Blob{Data: []byte(content)})
+		if err != nil {
+			b.Fatalf("write blob for %s: %v", path, err)
+		}
+		blobHashes[path] = blobHash
+	}
+
+	treeHash, err := buildTreeFromFiles(store.Objects, blobHashes)
+	if err != nil {
+		b.Fatalf("build tree: %v", err)
+	}
+	commitHash, err := store.Objects.WriteCommit(&object.CommitObj{
+		TreeHash:  treeHash,
+		Parents:   parents,
+		Author:    "bench",
+		Timestamp: ts,
+		Message:   message,
+	})
+	if err != nil {
+		b.Fatalf("write commit: %v", err)
+	}
+	return commitHash
+}
+
+func benchmarkSyntheticGoFiles(fileCount int) map[string]string {
+	files := make(map[string]string, fileCount)
+	for i := 0; i < fileCount; i++ {
+		pkg := i / 32
+		path := fmt.Sprintf("pkg%03d/file%03d.go", pkg, i)
+		files[path] = fmt.Sprintf("package pkg%03d\n\nfunc Helper%03d() int { return %d }\n", pkg, i, i)
+	}
+	return files
+}
+
+func cloneBenchmarkSyntheticFiles(src map[string]string) map[string]string {
+	cloned := make(map[string]string, len(src))
+	for path, content := range src {
+		cloned[path] = content
+	}
+	return cloned
+}

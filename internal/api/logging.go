@@ -1,0 +1,317 @@
+package api
+
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"log/slog"
+	"net"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
+)
+
+const (
+	maxAPIBodyBytes int64 = 2 << 20
+
+	authRateLimitPerSec     = 5.0
+	authRateLimitBurst      = 20.0
+	apiRateLimitPerSec      = 80.0
+	apiRateLimitBurst       = 160.0
+	protocolRateLimitPerSec = 20.0
+	protocolRateLimitBurst  = 40.0
+
+	limiterBucketTTL       = 10 * time.Minute
+	limiterCleanupInterval = time.Minute
+)
+
+var defaultForwardedForTrustedProxyCIDRs = []string{
+	"127.0.0.1/32",
+	"::1/128",
+}
+
+type clientIPResolver struct {
+	trustedProxyNetworks []*net.IPNet
+}
+
+func newClientIPResolver(trustedProxyCIDRs []string) clientIPResolver {
+	cidrs := make([]string, 0, len(defaultForwardedForTrustedProxyCIDRs)+len(trustedProxyCIDRs))
+	cidrs = append(cidrs, defaultForwardedForTrustedProxyCIDRs...)
+	cidrs = append(cidrs, trustedProxyCIDRs...)
+	return clientIPResolver{
+		trustedProxyNetworks: parseTrustedProxyCIDRs(cidrs),
+	}
+}
+
+func parseTrustedProxyCIDRs(cidrs []string) []*net.IPNet {
+	result := make([]*net.IPNet, 0, len(cidrs))
+	for _, raw := range cidrs {
+		value := strings.TrimSpace(raw)
+		if value == "" {
+			continue
+		}
+		if ip := net.ParseIP(value); ip != nil {
+			bits := 128
+			if v4 := ip.To4(); v4 != nil {
+				ip = v4
+				bits = 32
+			}
+			result = append(result, &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)})
+			continue
+		}
+		_, block, err := net.ParseCIDR(value)
+		if err != nil {
+			slog.Warn("invalid trusted proxy CIDR entry; ignoring", "cidr", value, "error", err)
+			continue
+		}
+		result = append(result, block)
+	}
+	return result
+}
+
+type rateLimitBucket struct {
+	tokens     float64
+	lastRefill time.Time
+	lastSeen   time.Time
+}
+
+type tokenBucketLimiter struct {
+	mu          sync.Mutex
+	ratePerSec  float64
+	burst       float64
+	buckets     map[string]rateLimitBucket
+	lastCleanup time.Time
+}
+
+func newTokenBucketLimiter(ratePerSec, burst float64) *tokenBucketLimiter {
+	return &tokenBucketLimiter{
+		ratePerSec: ratePerSec,
+		burst:      burst,
+		buckets:    make(map[string]rateLimitBucket),
+	}
+}
+
+func (l *tokenBucketLimiter) allow(key string, now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	b := l.buckets[key]
+	if b.lastRefill.IsZero() {
+		b.tokens = l.burst
+		b.lastRefill = now
+	}
+	elapsed := now.Sub(b.lastRefill).Seconds()
+	if elapsed > 0 {
+		b.tokens += elapsed * l.ratePerSec
+		if b.tokens > l.burst {
+			b.tokens = l.burst
+		}
+		b.lastRefill = now
+	}
+	b.lastSeen = now
+	allowed := b.tokens >= 1.0
+	if allowed {
+		b.tokens -= 1.0
+	}
+	l.buckets[key] = b
+
+	if l.lastCleanup.IsZero() || now.Sub(l.lastCleanup) >= limiterCleanupInterval {
+		for k, entry := range l.buckets {
+			if now.Sub(entry.lastSeen) > limiterBucketTTL {
+				delete(l.buckets, k)
+			}
+		}
+		l.lastCleanup = now
+	}
+	return allowed
+}
+
+type requestRateLimiter struct {
+	auth     *tokenBucketLimiter
+	api      *tokenBucketLimiter
+	protocol *tokenBucketLimiter
+}
+
+func newRequestRateLimiter() *requestRateLimiter {
+	return &requestRateLimiter{
+		auth:     newTokenBucketLimiter(authRateLimitPerSec, authRateLimitBurst),
+		api:      newTokenBucketLimiter(apiRateLimitPerSec, apiRateLimitBurst),
+		protocol: newTokenBucketLimiter(protocolRateLimitPerSec, protocolRateLimitBurst),
+	}
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (s *statusRecorder) WriteHeader(code int) {
+	s.status = code
+	s.ResponseWriter.WriteHeader(code)
+}
+
+func (s *statusRecorder) Flush() {
+	if flusher, ok := s.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+func generateRequestID() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "unknown"
+	}
+	return hex.EncodeToString(b[:])
+}
+
+func requestLoggingMiddleware(ipResolver clientIPResolver, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		reqID := generateRequestID()
+		w.Header().Set("X-Request-ID", reqID)
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r)
+		slog.Info("request",
+			"request_id", reqID,
+			"method", r.Method,
+			"path", r.URL.RequestURI(),
+			"status", rec.status,
+			"duration", time.Since(start),
+			"ip", ipResolver.clientIPFromRequest(r),
+		)
+	})
+}
+
+func corsMiddleware(allowedOrigins []string, next http.Handler) http.Handler {
+	allowed := make(map[string]struct{}, len(allowedOrigins))
+	wildcard := false
+	for _, origin := range allowedOrigins {
+		o := strings.TrimSpace(origin)
+		if o == "" {
+			continue
+		}
+		if o == "*" {
+			wildcard = true
+			continue
+		}
+		allowed[o] = struct{}{}
+	}
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		if strings.HasPrefix(path, "/api/") || strings.HasPrefix(path, "/git/") || strings.HasPrefix(path, "/graft/") {
+			origin := strings.TrimSpace(r.Header.Get("Origin"))
+			switch {
+			case wildcard || len(allowed) == 0:
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+			case origin != "":
+				if _, ok := allowed[origin]; ok {
+					w.Header().Set("Access-Control-Allow-Origin", origin)
+					w.Header().Set("Vary", "Origin")
+				}
+			}
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+			w.Header().Set("Access-Control-Max-Age", "600")
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func requestRateLimitMiddleware(ipResolver clientIPResolver, limiter *requestRateLimiter, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if limiter == nil || r.Method == http.MethodOptions {
+			next.ServeHTTP(w, r)
+			return
+		}
+		path := r.URL.Path
+		scope := ""
+		switch {
+		case strings.HasPrefix(path, "/api/v1/auth/"):
+			scope = "auth"
+		case strings.HasPrefix(path, "/api/v1/"):
+			scope = "api"
+		case strings.HasPrefix(path, "/git/"), strings.HasPrefix(path, "/graft/"):
+			scope = "protocol"
+		default:
+			next.ServeHTTP(w, r)
+			return
+		}
+		key := ipResolver.clientIPFromRequest(r)
+		now := time.Now()
+		allowed := true
+		switch scope {
+		case "auth":
+			allowed = limiter.auth.allow(key, now)
+		case "api":
+			allowed = limiter.api.allow(key, now)
+		case "protocol":
+			allowed = limiter.protocol.allow(key, now)
+		}
+		if !allowed {
+			w.Header().Set("Retry-After", "1")
+			http.Error(w, `{"error":"rate limit exceeded"}`, http.StatusTooManyRequests)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (r clientIPResolver) clientIPFromRequest(req *http.Request) string {
+	if r.trustXForwardedFor(req) {
+		forwarded := strings.TrimSpace(req.Header.Get("X-Forwarded-For"))
+		if idx := strings.Index(forwarded, ","); idx >= 0 {
+			forwarded = strings.TrimSpace(forwarded[:idx])
+		}
+		if forwarded != "" {
+			return forwarded
+		}
+	}
+	host, _, err := net.SplitHostPort(strings.TrimSpace(req.RemoteAddr))
+	if err == nil && host != "" {
+		return host
+	}
+	return strings.TrimSpace(req.RemoteAddr)
+}
+
+func (r clientIPResolver) trustXForwardedFor(req *http.Request) bool {
+	host := strings.TrimSpace(req.RemoteAddr)
+	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+		host = parsedHost
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	for _, block := range r.trustedProxyNetworks {
+		if block.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+func requestBodyLimitMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/api/v1/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		switch r.Method {
+		case http.MethodPost, http.MethodPut, http.MethodPatch:
+		default:
+			next.ServeHTTP(w, r)
+			return
+		}
+		if r.ContentLength > maxAPIBodyBytes {
+			http.Error(w, `{"error":"request body too large"}`, http.StatusRequestEntityTooLarge)
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, maxAPIBodyBytes)
+		next.ServeHTTP(w, r)
+	})
+}

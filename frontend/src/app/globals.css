@@ -1,0 +1,431 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-sans-face), system-ui, -apple-system, sans-serif;
+  --font-mono: var(--font-mono-face), 'Geist Mono', 'SF Mono', monospace;
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
+  --radius-3xl: calc(var(--radius) + 12px);
+  --radius-4xl: calc(var(--radius) + 16px);
+}
+
+/* ===================================================================
+   Orchard Design System — "Graph Calm"
+   System-theme by default. Neutral surfaces with restrained blue/cyan accents.
+   =================================================================== */
+
+:root {
+  --radius: 0.625rem;
+
+  --background: hsl(210, 24%, 98%);
+  --foreground: hsl(215, 30%, 14%);
+  --card: hsl(0, 0%, 100%);
+  --card-foreground: hsl(215, 30%, 14%);
+  --popover: hsl(0, 0%, 100%);
+  --popover-foreground: hsl(215, 30%, 14%);
+  --primary: hsl(203, 89%, 47%);
+  --primary-foreground: hsl(0, 0%, 100%);
+  --secondary: hsl(187, 64%, 44%);
+  --secondary-foreground: hsl(0, 0%, 100%);
+  --muted: hsl(210, 20%, 93%);
+  --muted-foreground: hsl(215, 14%, 42%);
+  --accent: hsl(210, 24%, 91%);
+  --accent-foreground: hsl(215, 30%, 14%);
+  --destructive: hsl(0, 72%, 51%);
+  --border: hsl(210, 18%, 86%);
+  --input: hsl(210, 18%, 86%);
+  --ring: hsl(203, 89%, 47%);
+  --chart-1: hsl(203, 89%, 52%);
+  --chart-2: hsl(187, 68%, 45%);
+  --chart-3: hsl(221, 64%, 56%);
+  --chart-4: hsl(30, 86%, 58%);
+  --chart-5: hsl(149, 58%, 42%);
+  --sidebar: hsl(210, 25%, 95%);
+  --sidebar-foreground: hsl(215, 30%, 14%);
+  --sidebar-primary: hsl(203, 89%, 47%);
+  --sidebar-primary-foreground: hsl(0, 0%, 100%);
+  --sidebar-accent: hsl(210, 21%, 90%);
+  --sidebar-accent-foreground: hsl(215, 30%, 14%);
+  --sidebar-border: hsl(210, 18%, 86%);
+  --sidebar-ring: hsl(203, 89%, 47%);
+
+  --hero-graph-node: 198 98% 38%;
+  --hero-graph-edge: 188 74% 36%;
+  --hero-accent: 209 88% 54%;
+  --hero-grid: 209 20% 58%;
+  --hero-glow-a: 196 88% 60%;
+  --hero-glow-b: 188 62% 52%;
+  --hero-fade: 210 35% 92%;
+  --hero-particle-base: 205 84% 44%;
+  --hero-particle-highlight: 191 78% 54%;
+  --hero-particle-shadow: 214 34% 72%;
+  --hero-particle-spark: 209 92% 64%;
+
+  --code-bg: 205 38% 98%;
+  --code-panel-bg: 210 35% 96%;
+  --code-fg: 218 30% 15%;
+  --code-syntax-keyword: 217 88% 41%;
+  --code-syntax-string: 152 64% 30%;
+  --code-syntax-comment: 214 13% 46%;
+  --code-syntax-function: 30 88% 36%;
+  --code-syntax-type: 194 82% 34%;
+  --code-syntax-number: 336 74% 42%;
+  --code-syntax-operator: 221 39% 34%;
+  --code-syntax-variable: 205 79% 34%;
+  --code-syntax-constant: 7 75% 42%;
+  --code-syntax-tag: 12 72% 39%;
+  --code-syntax-attribute: 195 82% 35%;
+}
+
+.dark {
+  --background: hsl(214, 26%, 9%);
+  --foreground: hsl(210, 30%, 94%);
+  --card: hsl(214, 20%, 14%);
+  --card-foreground: hsl(210, 30%, 94%);
+  --popover: hsl(214, 24%, 11%);
+  --popover-foreground: hsl(210, 30%, 94%);
+  --primary: hsl(196, 90%, 58%);
+  --primary-foreground: hsl(0, 0%, 100%);
+  --secondary: hsl(186, 63%, 51%);
+  --secondary-foreground: hsl(0, 0%, 100%);
+  --muted: hsl(215, 17%, 20%);
+  --muted-foreground: hsl(213, 13%, 62%);
+  --accent: hsl(215, 18%, 22%);
+  --accent-foreground: hsl(210, 30%, 94%);
+  --destructive: hsl(0, 72%, 51%);
+  --border: hsl(215, 15%, 25%);
+  --input: hsl(215, 15%, 25%);
+  --ring: hsl(196, 90%, 58%);
+  --chart-1: hsl(196, 92%, 62%);
+  --chart-2: hsl(186, 62%, 55%);
+  --chart-3: hsl(221, 72%, 64%);
+  --chart-4: hsl(31, 88%, 63%);
+  --chart-5: hsl(150, 58%, 54%);
+  --sidebar: hsl(214, 24%, 11%);
+  --sidebar-foreground: hsl(210, 30%, 94%);
+  --sidebar-primary: hsl(196, 90%, 58%);
+  --sidebar-primary-foreground: hsl(0, 0%, 100%);
+  --sidebar-accent: hsl(215, 17%, 20%);
+  --sidebar-accent-foreground: hsl(210, 30%, 94%);
+  --sidebar-border: hsl(215, 15%, 25%);
+  --sidebar-ring: hsl(196, 90%, 58%);
+
+  --surface-primary: hsl(214, 26%, 9%);
+  --surface-secondary: hsl(214, 24%, 11%);
+  --surface-tertiary: hsl(214, 20%, 14%);
+  --surface-elevated: hsl(215, 18%, 22%);
+  --surface-overlay: hsla(214, 35%, 6%, 0.82);
+
+  /* Text hierarchy */
+  --text-primary: hsl(210, 30%, 94%);
+  --text-secondary: hsl(213, 14%, 70%);
+  --text-muted: hsl(213, 13%, 62%);
+  --text-inverse: hsl(214, 26%, 9%);
+
+  /* Border scale */
+  --border-subtle: hsl(215, 16%, 19%);
+  --border-default: hsl(215, 15%, 25%);
+  --border-strong: hsl(215, 15%, 32%);
+
+  /* Shadow base */
+  --shadow-color: 214 42% 5%;
+
+  --hero-graph-node: 196 90% 58%;
+  --hero-graph-edge: 186 63% 51%;
+  --hero-accent: 212 88% 62%;
+  --hero-grid: 205 20% 52%;
+  --hero-glow-a: 196 90% 62%;
+  --hero-glow-b: 186 60% 52%;
+  --hero-fade: 214 45% 12%;
+  --hero-particle-base: 196 90% 62%;
+  --hero-particle-highlight: 212 98% 76%;
+  --hero-particle-shadow: 186 60% 44%;
+  --hero-particle-spark: 205 100% 82%;
+
+  --code-bg: 220 20% 7%;
+  --code-panel-bg: 220 20% 8%;
+  --code-fg: 210 30% 94%;
+  --code-syntax-keyword: 355 100% 73%;
+  --code-syntax-string: 205 100% 83%;
+  --code-syntax-comment: 219 12% 58%;
+  --code-syntax-function: 271 100% 83%;
+  --code-syntax-type: 203 100% 74%;
+  --code-syntax-number: 203 100% 74%;
+  --code-syntax-operator: 355 100% 73%;
+  --code-syntax-variable: 27 100% 68%;
+  --code-syntax-constant: 203 100% 74%;
+  --code-syntax-tag: 129 70% 70%;
+  --code-syntax-attribute: 203 100% 74%;
+}
+
+/* ===================================================================
+   Orchard Custom Properties (shared light/dark)
+   =================================================================== */
+:root {
+  /* Semantic status colors */
+  --color-success: hsl(142, 71%, 45%);
+  --color-success-light: hsl(142, 76%, 60%);
+  --color-warning: hsl(38, 92%, 50%);
+  --color-warning-light: hsl(45, 93%, 58%);
+  --color-error: hsl(0, 72%, 51%);
+  --color-error-light: hsl(0, 84%, 60%);
+  --color-info: hsl(217, 91%, 60%);
+  --color-info-light: hsl(217, 91%, 70%);
+
+  /* Entity kind colors */
+  --entity-function: hsl(180, 70%, 50%);
+  --entity-type: hsl(203, 89%, 52%);
+  --entity-method: hsl(217, 91%, 60%);
+  --entity-interface: hsl(38, 92%, 50%);
+  --entity-variable: hsl(220, 12%, 65%);
+  --entity-preamble: hsl(220, 10%, 45%);
+
+  /* Accent palette (direct access) */
+  --violet: hsl(203, 89%, 52%);
+  --violet-light: hsl(203, 88%, 62%);
+  --violet-dark: hsl(203, 90%, 44%);
+  --cyan: hsl(186, 63%, 51%);
+  --cyan-light: hsl(186, 66%, 60%);
+  --cyan-dark: hsl(186, 62%, 42%);
+
+  /* Fluid type scale (Minor Third 1.2) */
+  --text-xs: clamp(0.694rem, 0.66rem + 0.18vw, 0.8rem);
+  --text-sm: clamp(0.833rem, 0.78rem + 0.28vw, 1rem);
+  --text-base: clamp(1rem, 0.93rem + 0.38vw, 1.25rem);
+  --text-lg: clamp(1.2rem, 1.1rem + 0.52vw, 1.563rem);
+  --text-xl: clamp(1.44rem, 1.3rem + 0.72vw, 1.953rem);
+  --text-2xl: clamp(1.728rem, 1.54rem + 0.98vw, 2.441rem);
+  --text-3xl: clamp(2.074rem, 1.82rem + 1.32vw, 3.052rem);
+  --text-4xl: clamp(2.488rem, 2.14rem + 1.78vw, 3.815rem);
+
+  /* ===== Spacing System (fluid) ===== */
+  --space-3xs: clamp(0.25rem, 0.22rem + 0.11vw, 0.3125rem);
+  --space-2xs: clamp(0.5rem, 0.45rem + 0.22vw, 0.625rem);
+  --space-xs: clamp(0.75rem, 0.68rem + 0.33vw, 0.9375rem);
+  --space-sm: clamp(1rem, 0.91rem + 0.43vw, 1.25rem);
+  --space-md: clamp(1.5rem, 1.37rem + 0.65vw, 1.875rem);
+  --space-lg: clamp(2rem, 1.83rem + 0.87vw, 2.5rem);
+  --space-xl: clamp(3rem, 2.74rem + 1.3vw, 3.75rem);
+  --space-2xl: clamp(4rem, 3.65rem + 1.74vw, 5rem);
+  --space-3xl: clamp(6rem, 5.48rem + 2.61vw, 7.5rem);
+
+  /* ===== Animation & Transitions ===== */
+  --duration-instant: 100ms;
+  --duration-fast: 200ms;
+  --duration-normal: 300ms;
+  --duration-slow: 500ms;
+  --duration-emphasis: 800ms;
+
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-out-quart: cubic-bezier(0.25, 1, 0.5, 1);
+  --ease-in-out-quart: cubic-bezier(0.76, 0, 0.24, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+
+  /* ===== Shadows ===== */
+  --shadow-xs: 0 1px 2px hsl(var(--shadow-color, 0 0% 0%) / 0.05);
+  --shadow-sm: 0 1px 3px hsl(var(--shadow-color, 0 0% 0%) / 0.1), 0 1px 2px hsl(var(--shadow-color, 0 0% 0%) / 0.06);
+  --shadow-md: 0 4px 6px hsl(var(--shadow-color, 0 0% 0%) / 0.1), 0 2px 4px hsl(var(--shadow-color, 0 0% 0%) / 0.06);
+  --shadow-lg: 0 10px 15px hsl(var(--shadow-color, 0 0% 0%) / 0.1), 0 4px 6px hsl(var(--shadow-color, 0 0% 0%) / 0.05);
+  --shadow-xl: 0 20px 25px hsl(var(--shadow-color, 0 0% 0%) / 0.1), 0 10px 10px hsl(var(--shadow-color, 0 0% 0%) / 0.04);
+  --shadow-glow-violet: 0 0 20px hsla(203, 89%, 52%, 0.15);
+  --shadow-glow-cyan: 0 0 20px hsla(186, 63%, 51%, 0.15);
+}
+
+/* ===================================================================
+   Base layer
+   =================================================================== */
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+/* ===================================================================
+   Utility classes
+   =================================================================== */
+@layer utilities {
+  .scrollbar-hide::-webkit-scrollbar {
+    display: none;
+  }
+  .scrollbar-hide {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  .transform-gpu {
+    transform: translateZ(0);
+  }
+}
+
+/* ===================================================================
+   Keyframe animations
+   =================================================================== */
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes fadeOut {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+@keyframes slideInFromBottom {
+  from { opacity: 0; transform: translateY(1rem); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slideInFromTop {
+  from { opacity: 0; transform: translateY(-0.5rem); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slideInFromLeft {
+  from { opacity: 0; transform: translateX(-1rem); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes slideInFromRight {
+  from { opacity: 0; transform: translateX(1rem); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes zoomIn {
+  from { opacity: 0; transform: scale(0.95); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+@keyframes entityPulse {
+  0%, 100% { box-shadow: 0 0 0 0 hsla(180, 70%, 50%, 0); }
+  50% { box-shadow: 0 0 0 4px hsla(180, 70%, 50%, 0.15); }
+}
+
+@keyframes reveal {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* ===================================================================
+   Animation utilities
+   =================================================================== */
+
+.animate-shimmer {
+  animation: shimmer 1.5s ease-in-out infinite;
+  background: linear-gradient(
+    90deg,
+    var(--muted) 0%,
+    var(--accent) 50%,
+    var(--muted) 100%
+  );
+  background-size: 200% 100%;
+}
+
+.animate-entity-pulse {
+  animation: entityPulse 2s ease-in-out infinite;
+}
+
+.animate-fade-in {
+  animation: fadeIn var(--duration-normal) var(--ease-out-expo) forwards;
+}
+
+.animate-slide-up {
+  animation: slideInFromBottom var(--duration-normal) var(--ease-out-expo) forwards;
+}
+
+.animate-reveal {
+  animation: reveal var(--duration-slow) var(--ease-out-expo) forwards;
+}
+
+/* Staggered reveal delays */
+.reveal-delay-1 { animation-delay: 50ms; }
+.reveal-delay-2 { animation-delay: 100ms; }
+.reveal-delay-3 { animation-delay: 150ms; }
+.reveal-delay-4 { animation-delay: 200ms; }
+.reveal-delay-5 { animation-delay: 250ms; }
+
+/* ===================================================================
+   Accessibility
+   =================================================================== */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Skip to content */
+.skip-to-content {
+  position: fixed;
+  top: -100px;
+  left: 0;
+  z-index: 9999;
+  transition: top var(--duration-fast) var(--ease-out-expo);
+}
+.skip-to-content:focus {
+  top: var(--space-sm);
+}
+
+/* Focus visible */
+*:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+*:focus:not(:focus-visible) {
+  outline: none;
+}

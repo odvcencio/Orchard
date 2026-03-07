@@ -1,0 +1,213 @@
+package config
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestDefaultConfig(t *testing.T) {
+	cfg := Default()
+
+	if cfg.Server.Host != "0.0.0.0" {
+		t.Fatalf("Server.Host = %q, want %q", cfg.Server.Host, "0.0.0.0")
+	}
+	if cfg.Server.Port != 3000 {
+		t.Fatalf("Server.Port = %d, want 3000", cfg.Server.Port)
+	}
+	if cfg.Database.Driver != "sqlite" {
+		t.Fatalf("Database.Driver = %q, want %q", cfg.Database.Driver, "sqlite")
+	}
+	if cfg.Auth.JWTSecret != "change-me-in-production" {
+		t.Fatalf("Auth.JWTSecret = %q, want default", cfg.Auth.JWTSecret)
+	}
+	if cfg.Tenancy.Enabled {
+		t.Fatal("Tenancy.Enabled = true, want default false")
+	}
+	if cfg.Tenancy.Header != "X-Orchard-Tenant-ID" {
+		t.Fatalf("Tenancy.Header = %q, want %q", cfg.Tenancy.Header, "X-Orchard-Tenant-ID")
+	}
+	if cfg.Launch.RestrictToPublicRepos {
+		t.Fatal("Launch.RestrictToPublicRepos = true, want default false")
+	}
+	if cfg.Launch.MaxPublicReposPerUser != 0 {
+		t.Fatalf("Launch.MaxPublicReposPerUser = %d, want default 0", cfg.Launch.MaxPublicReposPerUser)
+	}
+	if cfg.Launch.RequirePrivateRepoPlan {
+		t.Fatal("Launch.RequirePrivateRepoPlan = true, want default false")
+	}
+	if cfg.Launch.MaxPrivateReposPerUser != 0 {
+		t.Fatalf("Launch.MaxPrivateReposPerUser = %d, want default 0", cfg.Launch.MaxPrivateReposPerUser)
+	}
+	if cfg.Launch.PrivateRepoAllowedUsers != nil {
+		t.Fatalf("Launch.PrivateRepoAllowedUsers = %#v, want nil", cfg.Launch.PrivateRepoAllowedUsers)
+	}
+}
+
+func TestLoadAppliesEnvOverrides(t *testing.T) {
+	t.Setenv("ORCHARD_HOST", "127.0.0.1")
+	t.Setenv("ORCHARD_PORT", "4000")
+	t.Setenv("ORCHARD_TRUSTED_PROXIES", "10.0.0.0/8, 192.168.1.10")
+	t.Setenv("ORCHARD_DB_DRIVER", "postgres")
+	t.Setenv("ORCHARD_DB_DSN", "postgres://example")
+	t.Setenv("ORCHARD_STORAGE_PATH", "/tmp/repos")
+	t.Setenv("ORCHARD_JWT_SECRET", "unit-test-secret-123")
+	t.Setenv("ORCHARD_ENABLE_TENANCY", "true")
+	t.Setenv("ORCHARD_TENANCY_HEADER", "X-Tenant-ID")
+	t.Setenv("ORCHARD_DEFAULT_TENANT_ID", "tenant-default")
+	t.Setenv("ORCHARD_RESTRICT_TO_PUBLIC_REPOS", "true")
+	t.Setenv("ORCHARD_MAX_PUBLIC_REPOS_PER_USER", "7")
+	t.Setenv("ORCHARD_REQUIRE_PRIVATE_REPO_PLAN", "true")
+	t.Setenv("ORCHARD_MAX_PRIVATE_REPOS_PER_USER", "3")
+	t.Setenv("ORCHARD_PRIVATE_REPO_ALLOWED_USERS", "alice, bob")
+
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if cfg.Server.Host != "127.0.0.1" {
+		t.Fatalf("Server.Host = %q, want %q", cfg.Server.Host, "127.0.0.1")
+	}
+	if cfg.Server.Port != 4000 {
+		t.Fatalf("Server.Port = %d, want 4000", cfg.Server.Port)
+	}
+	if len(cfg.Server.TrustedProxies) != 2 {
+		t.Fatalf("Server.TrustedProxies length = %d, want 2", len(cfg.Server.TrustedProxies))
+	}
+	if cfg.Server.TrustedProxies[0] != "10.0.0.0/8" {
+		t.Fatalf("Server.TrustedProxies[0] = %q, want %q", cfg.Server.TrustedProxies[0], "10.0.0.0/8")
+	}
+	if cfg.Server.TrustedProxies[1] != "192.168.1.10" {
+		t.Fatalf("Server.TrustedProxies[1] = %q, want %q", cfg.Server.TrustedProxies[1], "192.168.1.10")
+	}
+	if cfg.Database.Driver != "postgres" {
+		t.Fatalf("Database.Driver = %q, want %q", cfg.Database.Driver, "postgres")
+	}
+	if cfg.Database.DSN != "postgres://example" {
+		t.Fatalf("Database.DSN = %q, want %q", cfg.Database.DSN, "postgres://example")
+	}
+	if cfg.Storage.Path != "/tmp/repos" {
+		t.Fatalf("Storage.Path = %q, want %q", cfg.Storage.Path, "/tmp/repos")
+	}
+	if cfg.Auth.JWTSecret != "unit-test-secret-123" {
+		t.Fatalf("Auth.JWTSecret = %q, want override", cfg.Auth.JWTSecret)
+	}
+	if !cfg.Tenancy.Enabled {
+		t.Fatal("Tenancy.Enabled = false, want true")
+	}
+	if cfg.Tenancy.Header != "X-Tenant-ID" {
+		t.Fatalf("Tenancy.Header = %q, want %q", cfg.Tenancy.Header, "X-Tenant-ID")
+	}
+	if cfg.Tenancy.DefaultTenantID != "tenant-default" {
+		t.Fatalf("Tenancy.DefaultTenantID = %q, want %q", cfg.Tenancy.DefaultTenantID, "tenant-default")
+	}
+	if !cfg.Launch.RestrictToPublicRepos {
+		t.Fatal("Launch.RestrictToPublicRepos = false, want true")
+	}
+	if cfg.Launch.MaxPublicReposPerUser != 7 {
+		t.Fatalf("Launch.MaxPublicReposPerUser = %d, want 7", cfg.Launch.MaxPublicReposPerUser)
+	}
+	if !cfg.Launch.RequirePrivateRepoPlan {
+		t.Fatal("Launch.RequirePrivateRepoPlan = false, want true")
+	}
+	if cfg.Launch.MaxPrivateReposPerUser != 3 {
+		t.Fatalf("Launch.MaxPrivateReposPerUser = %d, want 3", cfg.Launch.MaxPrivateReposPerUser)
+	}
+	if len(cfg.Launch.PrivateRepoAllowedUsers) != 2 {
+		t.Fatalf("Launch.PrivateRepoAllowedUsers length = %d, want 2", len(cfg.Launch.PrivateRepoAllowedUsers))
+	}
+	if cfg.Launch.PrivateRepoAllowedUsers[0] != "alice" {
+		t.Fatalf("Launch.PrivateRepoAllowedUsers[0] = %q, want %q", cfg.Launch.PrivateRepoAllowedUsers[0], "alice")
+	}
+	if cfg.Launch.PrivateRepoAllowedUsers[1] != "bob" {
+		t.Fatalf("Launch.PrivateRepoAllowedUsers[1] = %q, want %q", cfg.Launch.PrivateRepoAllowedUsers[1], "bob")
+	}
+}
+
+func TestLoadFromYAML(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	body := []byte(`
+server:
+  host: 127.0.0.1
+  port: 5555
+  trusted_proxies:
+    - 10.0.0.0/8
+    - 192.168.1.10
+database:
+  driver: sqlite
+  dsn: test.db
+storage:
+  path: data/repos
+auth:
+  jwt_secret: yaml-secret-123456
+  token_duration: 12h
+tenancy:
+  enabled: true
+  header: X-Tenant-ID
+  default_tenant_id: tenant-yaml
+launch:
+  restrict_to_public_repos: true
+  max_public_repos_per_user: 9
+  require_private_repo_plan: true
+  max_private_repos_per_user: 2
+  private_repo_allowed_users:
+    - alice
+    - bob
+`)
+	if err := os.WriteFile(path, body, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load(path): %v", err)
+	}
+
+	if cfg.Server.Port != 5555 {
+		t.Fatalf("Server.Port = %d, want 5555", cfg.Server.Port)
+	}
+	if len(cfg.Server.TrustedProxies) != 2 {
+		t.Fatalf("Server.TrustedProxies length = %d, want 2", len(cfg.Server.TrustedProxies))
+	}
+	if cfg.Server.TrustedProxies[0] != "10.0.0.0/8" {
+		t.Fatalf("Server.TrustedProxies[0] = %q, want %q", cfg.Server.TrustedProxies[0], "10.0.0.0/8")
+	}
+	if cfg.Server.TrustedProxies[1] != "192.168.1.10" {
+		t.Fatalf("Server.TrustedProxies[1] = %q, want %q", cfg.Server.TrustedProxies[1], "192.168.1.10")
+	}
+	if cfg.Auth.TokenDuration != "12h" {
+		t.Fatalf("Auth.TokenDuration = %q, want %q", cfg.Auth.TokenDuration, "12h")
+	}
+	if !cfg.Tenancy.Enabled {
+		t.Fatal("Tenancy.Enabled = false, want true")
+	}
+	if cfg.Tenancy.Header != "X-Tenant-ID" {
+		t.Fatalf("Tenancy.Header = %q, want %q", cfg.Tenancy.Header, "X-Tenant-ID")
+	}
+	if cfg.Tenancy.DefaultTenantID != "tenant-yaml" {
+		t.Fatalf("Tenancy.DefaultTenantID = %q, want %q", cfg.Tenancy.DefaultTenantID, "tenant-yaml")
+	}
+	if !cfg.Launch.RestrictToPublicRepos {
+		t.Fatal("Launch.RestrictToPublicRepos = false, want true")
+	}
+	if cfg.Launch.MaxPublicReposPerUser != 9 {
+		t.Fatalf("Launch.MaxPublicReposPerUser = %d, want 9", cfg.Launch.MaxPublicReposPerUser)
+	}
+	if !cfg.Launch.RequirePrivateRepoPlan {
+		t.Fatal("Launch.RequirePrivateRepoPlan = false, want true")
+	}
+	if cfg.Launch.MaxPrivateReposPerUser != 2 {
+		t.Fatalf("Launch.MaxPrivateReposPerUser = %d, want 2", cfg.Launch.MaxPrivateReposPerUser)
+	}
+	if len(cfg.Launch.PrivateRepoAllowedUsers) != 2 {
+		t.Fatalf("Launch.PrivateRepoAllowedUsers length = %d, want 2", len(cfg.Launch.PrivateRepoAllowedUsers))
+	}
+	if cfg.Launch.PrivateRepoAllowedUsers[0] != "alice" {
+		t.Fatalf("Launch.PrivateRepoAllowedUsers[0] = %q, want %q", cfg.Launch.PrivateRepoAllowedUsers[0], "alice")
+	}
+	if cfg.Launch.PrivateRepoAllowedUsers[1] != "bob" {
+		t.Fatalf("Launch.PrivateRepoAllowedUsers[1] = %q, want %q", cfg.Launch.PrivateRepoAllowedUsers[1], "bob")
+	}
+}

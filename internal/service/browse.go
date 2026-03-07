@@ -1,0 +1,799 @@
+package service
+
+import (
+	"context"
+	"fmt"
+	"path"
+	"sort"
+	"strings"
+	"sync"
+
+	"github.com/odvcencio/graft/pkg/object"
+	"github.com/odvcencio/orchard/internal/graftstore"
+)
+
+// TreeEntry represents a file or directory in a tree listing.
+type TreeEntry struct {
+	Name           string `json:"name"`
+	IsDir          bool   `json:"is_dir"`
+	BlobHash       string `json:"blob_hash,omitempty"`
+	EntityListHash string `json:"entity_list_hash,omitempty"`
+	SubtreeHash    string `json:"subtree_hash,omitempty"`
+}
+
+// FileEntry represents a file with its full path (flattened tree).
+type FileEntry struct {
+	Path           string `json:"path"`
+	BlobHash       string `json:"blob_hash"`
+	EntityListHash string `json:"entity_list_hash,omitempty"`
+}
+
+// CommitInfo is a summary of a commit for API responses.
+type CommitInfo struct {
+	Hash      string   `json:"hash"`
+	TreeHash  string   `json:"tree_hash"`
+	Parents   []string `json:"parents"`
+	Author    string   `json:"author"`
+	Timestamp int64    `json:"timestamp"`
+	Message   string   `json:"message"`
+	Signature string   `json:"signature,omitempty"`
+	Verified  bool     `json:"verified"`
+	Signer    string   `json:"signer,omitempty"`
+}
+
+// BlobContent holds file content for API responses.
+type BlobContent struct {
+	Hash       string           `json:"hash"`
+	Data       []byte           `json:"data"`
+	Size       int              `json:"size"`
+	Language   string           `json:"language,omitempty"`
+	Highlights []HighlightRange `json:"highlights,omitempty"`
+	Entities   []EntityInfo     `json:"entities,omitempty"`
+}
+
+type BrowseService struct {
+	repoSvc      *RepoService
+	highlightSvc *HighlightService
+	hlCache      *HighlightCache
+}
+
+func NewBrowseService(repoSvc *RepoService) *BrowseService {
+	return NewBrowseServiceWithHighlighting(repoSvc, NewHighlightService(), nil)
+}
+
+func NewBrowseServiceWithHighlighting(
+	repoSvc *RepoService,
+	highlightSvc *HighlightService,
+	hlCache *HighlightCache,
+) *BrowseService {
+	if highlightSvc == nil {
+		highlightSvc = NewHighlightService()
+	}
+	return &BrowseService{
+		repoSvc:      repoSvc,
+		highlightSvc: highlightSvc,
+		hlCache:      hlCache,
+	}
+}
+
+// ResolveRef resolves a branch/tag name to a commit hash.
+func (s *BrowseService) ResolveRef(ctx context.Context, owner, repo, ref string) (object.Hash, error) {
+	store, err := s.repoSvc.OpenStore(ctx, owner, repo)
+	if err != nil {
+		return "", err
+	}
+	// Try branches first, then tags, then treat as raw hash
+	if h, err := store.Refs.Get("heads/" + ref); err == nil {
+		return h, nil
+	}
+	if h, err := store.Refs.Get("tags/" + ref); err == nil {
+		return h, nil
+	}
+	// Assume it's a raw commit hash
+	if store.Objects.Has(object.Hash(ref)) {
+		return object.Hash(ref), nil
+	}
+	return "", fmt.Errorf("ref not found: %s", ref)
+}
+
+// ListBranches returns all branch names (without the heads/ prefix).
+func (s *BrowseService) ListBranches(ctx context.Context, owner, repo string) ([]string, error) {
+	repoModel, err := s.repoSvc.Get(ctx, owner, repo)
+	if err != nil {
+		return nil, err
+	}
+
+	store, err := s.repoSvc.OpenStore(ctx, owner, repo)
+	if err != nil {
+		return nil, err
+	}
+	refs, err := store.Refs.List("heads")
+	if err != nil {
+		return nil, err
+	}
+
+	defaultBranch := strings.TrimSpace(repoModel.DefaultBranch)
+	if defaultBranch == "" {
+		defaultBranch = "main"
+	}
+	branchSet := make(map[string]struct{}, len(refs)+1)
+	branchSet[defaultBranch] = struct{}{}
+	for refName := range refs {
+		branch := strings.TrimPrefix(refName, "heads/")
+		if branch == "" {
+			continue
+		}
+		branchSet[branch] = struct{}{}
+	}
+
+	branches := make([]string, 0, len(branchSet))
+	for branch := range branchSet {
+		branches = append(branches, branch)
+	}
+	sort.Strings(branches)
+	return branches, nil
+}
+
+// ListTree returns the entries of a directory at the given path within a commit.
+func (s *BrowseService) ListTree(ctx context.Context, owner, repo, ref, dirPath string) ([]TreeEntry, error) {
+	store, err := s.repoSvc.OpenStore(ctx, owner, repo)
+	if err != nil {
+		return nil, err
+	}
+	commitHash, err := s.ResolveRef(ctx, owner, repo, ref)
+	if err != nil {
+		if isRefNotFoundError(err) {
+			if unborn, checkErr := isUnbornRepository(store); checkErr == nil && unborn {
+				return []TreeEntry{}, nil
+			}
+		}
+		return nil, err
+	}
+	commit, err := store.Objects.ReadCommit(commitHash)
+	if err != nil {
+		return nil, fmt.Errorf("read commit: %w", err)
+	}
+
+	treeHash := commit.TreeHash
+	// Walk down to the target directory
+	if dirPath != "" && dirPath != "." {
+		var walkErr error
+		treeHash, walkErr = walkToDir(store.Objects, treeHash, dirPath)
+		if walkErr != nil {
+			return nil, walkErr
+		}
+	}
+
+	tree, err := store.Objects.ReadTree(treeHash)
+	if err != nil {
+		return nil, fmt.Errorf("read tree: %w", err)
+	}
+
+	entries := make([]TreeEntry, len(tree.Entries))
+	for i, e := range tree.Entries {
+		entries[i] = TreeEntry{
+			Name:           e.Name,
+			IsDir:          e.IsDir,
+			BlobHash:       string(e.BlobHash),
+			EntityListHash: string(e.EntityListHash),
+			SubtreeHash:    string(e.SubtreeHash),
+		}
+	}
+	return entries, nil
+}
+
+// GetBlob returns the content of a file at the given path within a commit.
+func (s *BrowseService) GetBlob(ctx context.Context, owner, repo, ref, filePath string) (*BlobContent, error) {
+	store, err := s.repoSvc.OpenStore(ctx, owner, repo)
+	if err != nil {
+		return nil, err
+	}
+	commitHash, err := s.ResolveRef(ctx, owner, repo, ref)
+	if err != nil {
+		return nil, err
+	}
+	commit, err := store.Objects.ReadCommit(commitHash)
+	if err != nil {
+		return nil, fmt.Errorf("read commit: %w", err)
+	}
+
+	blobHash, err := findBlob(store.Objects, commit.TreeHash, filePath)
+	if err != nil {
+		return nil, err
+	}
+
+	blob, err := store.Objects.ReadBlob(blobHash)
+	if err != nil {
+		return nil, fmt.Errorf("read blob: %w", err)
+	}
+	content := &BlobContent{
+		Hash: string(blobHash),
+		Data: blob.Data,
+		Size: len(blob.Data),
+	}
+	if s.highlightSvc == nil {
+		return content, nil
+	}
+
+	cacheKey := string(blobHash)
+	detectedLanguage := detectHighlightLanguage(filePath)
+	if cached, ok := s.hlCache.Get(cacheKey); ok && cached.Language == detectedLanguage {
+		content.Language = cached.Language
+		content.Highlights = cached.Highlights
+		content.Entities = cached.Entities
+		return content, nil
+	}
+
+	result := s.highlightSvc.Highlight(filePath, blob.Data)
+	content.Language = result.Language
+	content.Highlights = result.Highlights
+	content.Entities = result.Entities
+	if result.Language != "" {
+		s.hlCache.Put(cacheKey, result)
+	}
+	return content, nil
+}
+
+// GetCommit returns info about a single commit.
+func (s *BrowseService) GetCommit(ctx context.Context, owner, repo, hash string) (*CommitInfo, error) {
+	store, err := s.repoSvc.OpenStore(ctx, owner, repo)
+	if err != nil {
+		return nil, err
+	}
+	commit, err := store.Objects.ReadCommit(object.Hash(hash))
+	if err != nil {
+		return nil, fmt.Errorf("read commit: %w", err)
+	}
+	info := commitToInfo(hash, commit)
+	verified, signer, _ := verifyCommitSignature(ctx, s.repoSvc.db, commit)
+	info.Verified = verified
+	info.Signer = signer
+	return info, nil
+}
+
+// ListCommits returns the commit log starting from a ref, walking parents.
+func (s *BrowseService) ListCommits(ctx context.Context, owner, repo, ref string, limit, offset int) ([]CommitInfo, error) {
+	store, err := s.repoSvc.OpenStore(ctx, owner, repo)
+	if err != nil {
+		return nil, err
+	}
+	head, err := s.ResolveRef(ctx, owner, repo, ref)
+	if err != nil {
+		if isRefNotFoundError(err) {
+			if unborn, checkErr := isUnbornRepository(store); checkErr == nil && unborn {
+				return []CommitInfo{}, nil
+			}
+		}
+		return nil, err
+	}
+	if limit <= 0 {
+		limit = 30
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	commits := make([]CommitInfo, 0, limit)
+	queue := []object.Hash{head}
+	seen := map[object.Hash]bool{}
+	skipped := 0
+
+	for len(queue) > 0 && len(commits) < limit {
+		h := queue[0]
+		queue = queue[1:]
+		if seen[h] {
+			continue
+		}
+		seen[h] = true
+
+		commit, err := store.Objects.ReadCommit(h)
+		if err != nil {
+			continue
+		}
+		if skipped < offset {
+			skipped++
+		} else {
+			info := commitToInfo(string(h), commit)
+			verified, signer, _ := verifyCommitSignature(ctx, s.repoSvc.db, commit)
+			info.Verified = verified
+			info.Signer = signer
+			commits = append(commits, *info)
+		}
+		for _, p := range commit.Parents {
+			if !seen[p] {
+				queue = append(queue, p)
+			}
+		}
+	}
+	return commits, nil
+}
+
+// FlattenTree returns all files recursively under a commit's tree.
+func (s *BrowseService) FlattenTree(ctx context.Context, owner, repo, ref string) ([]FileEntry, error) {
+	store, err := s.repoSvc.OpenStore(ctx, owner, repo)
+	if err != nil {
+		return nil, err
+	}
+	commitHash, err := s.ResolveRef(ctx, owner, repo, ref)
+	if err != nil {
+		return nil, err
+	}
+	commit, err := store.Objects.ReadCommit(commitHash)
+	if err != nil {
+		return nil, fmt.Errorf("read commit: %w", err)
+	}
+	return flattenTree(store.Objects, commit.TreeHash, "")
+}
+
+// --- helpers ---
+
+func walkToDir(store *object.Store, treeHash object.Hash, dirPath string) (object.Hash, error) {
+	parts := strings.Split(strings.Trim(dirPath, "/"), "/")
+	current := treeHash
+	for _, part := range parts {
+		tree, err := store.ReadTree(current)
+		if err != nil {
+			return "", fmt.Errorf("read tree: %w", err)
+		}
+		found := false
+		for _, e := range tree.Entries {
+			if e.Name == part && e.IsDir {
+				current = e.SubtreeHash
+				found = true
+				break
+			}
+		}
+		if !found {
+			return "", fmt.Errorf("directory not found: %s", dirPath)
+		}
+	}
+	return current, nil
+}
+
+func findBlob(store *object.Store, treeHash object.Hash, filePath string) (object.Hash, error) {
+	dir := path.Dir(filePath)
+	name := path.Base(filePath)
+
+	targetTree := treeHash
+	if dir != "." && dir != "" {
+		var err error
+		targetTree, err = walkToDir(store, treeHash, dir)
+		if err != nil {
+			return "", err
+		}
+	}
+
+	tree, err := store.ReadTree(targetTree)
+	if err != nil {
+		return "", fmt.Errorf("read tree: %w", err)
+	}
+	for _, e := range tree.Entries {
+		if e.Name == name && !e.IsDir {
+			return e.BlobHash, nil
+		}
+	}
+	return "", fmt.Errorf("file not found: %s", filePath)
+}
+
+func flattenTree(store *object.Store, treeHash object.Hash, prefix string) ([]FileEntry, error) {
+	tree, err := store.ReadTree(treeHash)
+	if err != nil {
+		return nil, fmt.Errorf("read tree: %w", err)
+	}
+	var result []FileEntry
+	for _, e := range tree.Entries {
+		fullPath := e.Name
+		if prefix != "" {
+			fullPath = prefix + "/" + e.Name
+		}
+		if e.IsDir {
+			sub, err := flattenTree(store, e.SubtreeHash, fullPath)
+			if err != nil {
+				return nil, err
+			}
+			result = append(result, sub...)
+		} else {
+			result = append(result, FileEntry{
+				Path:           fullPath,
+				BlobHash:       string(e.BlobHash),
+				EntityListHash: string(e.EntityListHash),
+			})
+		}
+	}
+	return result, nil
+}
+
+func commitToInfo(hash string, c *object.CommitObj) *CommitInfo {
+	parents := make([]string, len(c.Parents))
+	for i, p := range c.Parents {
+		parents[i] = string(p)
+	}
+	return &CommitInfo{
+		Hash:      hash,
+		TreeHash:  string(c.TreeHash),
+		Parents:   parents,
+		Author:    c.Author,
+		Timestamp: c.Timestamp,
+		Message:   c.Message,
+		Signature: c.Signature,
+	}
+}
+
+func isRefNotFoundError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "ref not found")
+}
+
+func isUnbornRepository(store *gotstore.RepoStore) (bool, error) {
+	heads, err := store.Refs.List("heads")
+	if err != nil {
+		return false, err
+	}
+	tags, err := store.Refs.List("tags")
+	if err != nil {
+		return false, err
+	}
+	return len(heads) == 0 && len(tags) == 0, nil
+}
+
+type MergeBaseOptions struct {
+	GenerationLookup func(hash object.Hash) (uint64, bool, error)
+}
+
+// FindMergeBase finds the first common ancestor of two commits using BFS.
+func FindMergeBase(store *object.Store, a, b object.Hash) (object.Hash, error) {
+	return FindMergeBaseWithOptions(store, a, b, MergeBaseOptions{})
+}
+
+// FindMergeBaseWithOptions finds the first common ancestor and can use
+// persisted generation metadata when available.
+func FindMergeBaseWithOptions(store *object.Store, a, b object.Hash, opts MergeBaseOptions) (object.Hash, error) {
+	if a == "" || b == "" {
+		return "", fmt.Errorf("no common ancestor")
+	}
+	if a == b {
+		return a, nil
+	}
+	if cached, ok := getCachedMergeBase(a, b); ok {
+		return cached, nil
+	}
+
+	state := &mergeBaseSearchState{
+		store:            store,
+		commits:          make(map[object.Hash]*object.CommitObj),
+		generations:      make(map[object.Hash]uint64),
+		visiting:         make(map[object.Hash]bool),
+		generationLookup: opts.GenerationLookup,
+	}
+
+	genA, err := state.generation(a)
+	if err != nil {
+		return "", err
+	}
+	genB, err := state.generation(b)
+	if err != nil {
+		return "", err
+	}
+
+	// Fast-path: one side already contains the other.
+	if genA <= genB {
+		isAncestor, err := state.isAncestor(a, b, genA, genB)
+		if err != nil {
+			return "", err
+		}
+		if isAncestor {
+			setCachedMergeBase(a, b, a)
+			return a, nil
+		}
+		isAncestor, err = state.isAncestor(b, a, genB, genA)
+		if err != nil {
+			return "", err
+		}
+		if isAncestor {
+			setCachedMergeBase(a, b, b)
+			return b, nil
+		}
+	} else {
+		isAncestor, err := state.isAncestor(b, a, genB, genA)
+		if err != nil {
+			return "", err
+		}
+		if isAncestor {
+			setCachedMergeBase(a, b, b)
+			return b, nil
+		}
+		isAncestor, err = state.isAncestor(a, b, genA, genB)
+		if err != nil {
+			return "", err
+		}
+		if isAncestor {
+			setCachedMergeBase(a, b, a)
+			return a, nil
+		}
+	}
+
+	// Build ancestor set from the older head first, then walk the newer head
+	// and keep the highest-generation common ancestor.
+	if genA <= genB {
+		ancestors, err := state.collectAncestors(a)
+		if err != nil {
+			return "", err
+		}
+		base, found, err := state.findBestCommon(b, ancestors)
+		if err != nil {
+			return "", err
+		}
+		if found {
+			setCachedMergeBase(a, b, base)
+			return base, nil
+		}
+	} else {
+		ancestors, err := state.collectAncestors(b)
+		if err != nil {
+			return "", err
+		}
+		base, found, err := state.findBestCommon(a, ancestors)
+		if err != nil {
+			return "", err
+		}
+		if found {
+			setCachedMergeBase(a, b, base)
+			return base, nil
+		}
+	}
+
+	return "", fmt.Errorf("no common ancestor")
+}
+
+const (
+	maxMergeBaseTraversalSteps = 1_000_000
+	maxMergeBaseTraversalDepth = 1_000_000
+	mergeBaseCacheMaxEntries   = 4096
+)
+
+type mergeBaseQueueItem struct {
+	hash  object.Hash
+	depth int
+}
+
+type mergeBaseSearchState struct {
+	store            *object.Store
+	commits          map[object.Hash]*object.CommitObj
+	generations      map[object.Hash]uint64
+	visiting         map[object.Hash]bool
+	generationLookup func(hash object.Hash) (uint64, bool, error)
+}
+
+func (s *mergeBaseSearchState) readCommit(h object.Hash) (*object.CommitObj, error) {
+	if c, ok := s.commits[h]; ok {
+		return c, nil
+	}
+	c, err := s.store.ReadCommit(h)
+	if err != nil {
+		return nil, fmt.Errorf("read commit %s: %w", h, err)
+	}
+	s.commits[h] = c
+	return c, nil
+}
+
+func (s *mergeBaseSearchState) generation(h object.Hash) (uint64, error) {
+	if g, ok := s.generations[h]; ok {
+		return g, nil
+	}
+	if s.generationLookup != nil {
+		if g, ok, err := s.generationLookup(h); err != nil {
+			return 0, err
+		} else if ok && g > 0 {
+			s.generations[h] = g
+			return g, nil
+		}
+	}
+	if s.visiting[h] {
+		return 0, fmt.Errorf("commit graph cycle detected at %s", h)
+	}
+	s.visiting[h] = true
+	defer delete(s.visiting, h)
+
+	commit, err := s.readCommit(h)
+	if err != nil {
+		return 0, err
+	}
+	maxParent := uint64(0)
+	for _, p := range commit.Parents {
+		if p == "" {
+			continue
+		}
+		parentGen, err := s.generation(p)
+		if err != nil {
+			return 0, err
+		}
+		if parentGen > maxParent {
+			maxParent = parentGen
+		}
+	}
+	gen := maxParent + 1
+	s.generations[h] = gen
+	return gen, nil
+}
+
+func (s *mergeBaseSearchState) isAncestor(ancestor, descendant object.Hash, ancestorGen, descendantGen uint64) (bool, error) {
+	if ancestor == descendant {
+		return true, nil
+	}
+	if ancestorGen > descendantGen {
+		return false, nil
+	}
+	visited := map[object.Hash]struct{}{descendant: {}}
+	queue := []mergeBaseQueueItem{{hash: descendant, depth: 0}}
+	steps := 0
+
+	for len(queue) > 0 {
+		item := queue[0]
+		queue = queue[1:]
+		steps++
+		if steps > maxMergeBaseTraversalSteps {
+			return false, fmt.Errorf("find merge base: traversal exceeded maximum steps (%d)", maxMergeBaseTraversalSteps)
+		}
+		if item.depth > maxMergeBaseTraversalDepth {
+			return false, fmt.Errorf("find merge base: traversal exceeded maximum depth (%d)", maxMergeBaseTraversalDepth)
+		}
+
+		cur := item.hash
+		if cur == ancestor {
+			return true, nil
+		}
+
+		curGen, err := s.generation(cur)
+		if err != nil {
+			return false, err
+		}
+		if curGen <= ancestorGen {
+			continue
+		}
+
+		commit, err := s.readCommit(cur)
+		if err != nil {
+			return false, err
+		}
+		for _, p := range commit.Parents {
+			if p == "" {
+				continue
+			}
+			if _, seen := visited[p]; seen {
+				continue
+			}
+			parentGen, err := s.generation(p)
+			if err != nil {
+				return false, err
+			}
+			if parentGen < ancestorGen {
+				continue
+			}
+			visited[p] = struct{}{}
+			queue = append(queue, mergeBaseQueueItem{hash: p, depth: item.depth + 1})
+		}
+	}
+
+	return false, nil
+}
+
+func (s *mergeBaseSearchState) collectAncestors(start object.Hash) (map[object.Hash]struct{}, error) {
+	visited := map[object.Hash]struct{}{start: {}}
+	queue := []mergeBaseQueueItem{{hash: start, depth: 0}}
+	steps := 0
+
+	for len(queue) > 0 {
+		item := queue[0]
+		queue = queue[1:]
+		steps++
+		if steps > maxMergeBaseTraversalSteps {
+			return nil, fmt.Errorf("find merge base: traversal exceeded maximum steps (%d)", maxMergeBaseTraversalSteps)
+		}
+		if item.depth > maxMergeBaseTraversalDepth {
+			return nil, fmt.Errorf("find merge base: traversal exceeded maximum depth (%d)", maxMergeBaseTraversalDepth)
+		}
+
+		commit, err := s.readCommit(item.hash)
+		if err != nil {
+			return nil, err
+		}
+		for _, p := range commit.Parents {
+			if p == "" {
+				continue
+			}
+			if _, seen := visited[p]; seen {
+				continue
+			}
+			visited[p] = struct{}{}
+			queue = append(queue, mergeBaseQueueItem{hash: p, depth: item.depth + 1})
+		}
+	}
+
+	return visited, nil
+}
+
+func (s *mergeBaseSearchState) findBestCommon(start object.Hash, ancestors map[object.Hash]struct{}) (object.Hash, bool, error) {
+	visited := map[object.Hash]struct{}{start: {}}
+	queue := []mergeBaseQueueItem{{hash: start, depth: 0}}
+	steps := 0
+
+	var best object.Hash
+	bestGen := uint64(0)
+
+	for len(queue) > 0 {
+		item := queue[0]
+		queue = queue[1:]
+		steps++
+		if steps > maxMergeBaseTraversalSteps {
+			return "", false, fmt.Errorf("find merge base: traversal exceeded maximum steps (%d)", maxMergeBaseTraversalSteps)
+		}
+		if item.depth > maxMergeBaseTraversalDepth {
+			return "", false, fmt.Errorf("find merge base: traversal exceeded maximum depth (%d)", maxMergeBaseTraversalDepth)
+		}
+
+		cur := item.hash
+		curGen, err := s.generation(cur)
+		if err != nil {
+			return "", false, err
+		}
+		if _, ok := ancestors[cur]; ok && (best == "" || curGen > bestGen) {
+			best = cur
+			bestGen = curGen
+		}
+		if best != "" && curGen <= bestGen {
+			continue
+		}
+
+		commit, err := s.readCommit(cur)
+		if err != nil {
+			return "", false, err
+		}
+		for _, p := range commit.Parents {
+			if p == "" {
+				continue
+			}
+			if _, seen := visited[p]; seen {
+				continue
+			}
+			visited[p] = struct{}{}
+			queue = append(queue, mergeBaseQueueItem{hash: p, depth: item.depth + 1})
+		}
+	}
+
+	if best == "" {
+		return "", false, nil
+	}
+	return best, true, nil
+}
+
+var (
+	mergeBaseCacheMu sync.RWMutex
+	mergeBaseCache   = make(map[string]object.Hash)
+)
+
+func mergeBaseCacheKey(a, b object.Hash) string {
+	if a < b {
+		return string(a) + "|" + string(b)
+	}
+	return string(b) + "|" + string(a)
+}
+
+func getCachedMergeBase(a, b object.Hash) (object.Hash, bool) {
+	key := mergeBaseCacheKey(a, b)
+	mergeBaseCacheMu.RLock()
+	base, ok := mergeBaseCache[key]
+	mergeBaseCacheMu.RUnlock()
+	return base, ok
+}
+
+func setCachedMergeBase(a, b, base object.Hash) {
+	key := mergeBaseCacheKey(a, b)
+	mergeBaseCacheMu.Lock()
+	if len(mergeBaseCache) >= mergeBaseCacheMaxEntries {
+		mergeBaseCache = make(map[string]object.Hash, mergeBaseCacheMaxEntries/2)
+	}
+	mergeBaseCache[key] = base
+	mergeBaseCacheMu.Unlock()
+}
+
+// unused import guard
+var _ = (*gotstore.RepoStore)(nil)

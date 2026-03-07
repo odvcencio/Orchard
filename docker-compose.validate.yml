@@ -1,0 +1,46 @@
+services:
+  orchard:
+    image: debian:bookworm-slim
+    entrypoint: ["/usr/local/bin/orchard", "serve"]
+    ports:
+      - "${VALIDATE_API_PORT:-3110}:3000"
+    environment:
+      ORCHARD_HOST: 0.0.0.0
+      ORCHARD_PORT: 3000
+      ORCHARD_DB_DRIVER: sqlite
+      ORCHARD_DB_DSN: /data/orchard-validate.db
+      ORCHARD_STORAGE_PATH: /data/repos
+      ORCHARD_JWT_SECRET: ${ORCHARD_JWT_SECRET:-dev-jwt-secret-change-this}
+      ORCHARD_CORS_ALLOW_ORIGINS: http://localhost:${VALIDATE_WEB_PORT:-3111}
+      ORCHARD_WEBAUTHN_ORIGIN: http://localhost:${VALIDATE_WEB_PORT:-3111}
+      ORCHARD_BOOTSTRAP_SSH_TOKEN: ${ORCHARD_BOOTSTRAP_SSH_TOKEN:-validate-bootstrap-secret}
+    volumes:
+      - ./orchard:/usr/local/bin/orchard:ro
+      - validate-repo-data:/data
+    mem_limit: 1200m
+    memswap_limit: 1200m
+    cpus: 2.0
+    pids_limit: 512
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        ORCHARD_API_URL: http://orchard:3000
+    ports:
+      - "${VALIDATE_WEB_PORT:-3111}:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: http://orchard:3000
+    depends_on:
+      orchard:
+        condition: service_started
+    mem_limit: 1500m
+    memswap_limit: 1500m
+    cpus: 2.0
+    pids_limit: 512
+    restart: unless-stopped
+
+volumes:
+  validate-repo-data:

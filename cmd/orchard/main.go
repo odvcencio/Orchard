@@ -1,0 +1,264 @@
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/odvcencio/orchard/internal/api"
+	"github.com/odvcencio/orchard/internal/auth"
+	"github.com/odvcencio/orchard/internal/config"
+	"github.com/odvcencio/orchard/internal/database"
+	"github.com/odvcencio/orchard/internal/service"
+)
+
+var legacyTrustAllProxyCIDRs = []string{
+	"0.0.0.0/0",
+	"::/0",
+}
+
+func main() {
+	if len(os.Args) < 2 {
+		fmt.Fprintf(os.Stderr, "Usage: orchard <command>\n\nCommands:\n  serve    Start the server\n  migrate  Run database migrations\n")
+		os.Exit(1)
+	}
+
+	switch os.Args[1] {
+	case "serve":
+		cmdServe(os.Args[2:])
+	case "migrate":
+		cmdMigrate(os.Args[2:])
+	default:
+		fmt.Fprintf(os.Stderr, "unknown command: %s\n", os.Args[1])
+		os.Exit(1)
+	}
+}
+
+func cmdServe(args []string) {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
+
+	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	configPath := fs.String("config", "", "path to config file")
+	fs.Parse(args)
+
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		slog.Error("load config", "error", err)
+		os.Exit(1)
+	}
+	if err := validateServeConfig(cfg); err != nil {
+		slog.Error("invalid config", "error", err)
+		os.Exit(1)
+	}
+
+	traceShutdown, err := initTracing(context.Background())
+	if err != nil {
+		slog.Error("init tracing", "error", err)
+		os.Exit(1)
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := traceShutdown(ctx); err != nil {
+			slog.Error("shutdown tracing", "error", err)
+		}
+	}()
+
+	db, err := openDB(cfg)
+	if err != nil {
+		slog.Error("open database", "error", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	// Auto-migrate on startup
+	if err := db.Migrate(context.Background()); err != nil {
+		slog.Error("migrate", "error", err)
+		os.Exit(1)
+	}
+
+	dur, err := time.ParseDuration(cfg.Auth.TokenDuration)
+	if err != nil {
+		dur = 24 * time.Hour
+	}
+	authSvc := auth.NewService(cfg.Auth.JWTSecret, dur)
+	repoSvc := service.NewRepoService(db, cfg.Storage.Path)
+	serverOpts := api.ServerOptions{
+		EnableAsyncIndexing:      envBool("ORCHARD_ENABLE_ASYNC_INDEXING"),
+		IndexWorkerCount:         envInt("ORCHARD_INDEX_WORKER_COUNT", 2),
+		IndexWorkerPoll:          envDuration("ORCHARD_INDEX_WORKER_POLL_INTERVAL", 250*time.Millisecond),
+		EnableAdminHealth:        envBool("ORCHARD_ENABLE_ADMIN_HEALTH"),
+		EnablePprof:              envBool("ORCHARD_ENABLE_PPROF"),
+		AdminAllowedCIDRs:        parseAdminCIDRs("ORCHARD_ADMIN_ALLOWED_CIDRS"),
+		CORSAllowedOrigins:       parseCSVEnv("ORCHARD_CORS_ALLOW_ORIGINS"),
+		TrustedProxyCIDRs:        trustedProxyCIDRs(cfg),
+		EnableTenantContext:      cfg.Tenancy.Enabled,
+		TenantHeader:             cfg.Tenancy.Header,
+		DefaultTenantID:          cfg.Tenancy.DefaultTenantID,
+		RestrictToPublic:         cfg.Launch.RestrictToPublicRepos,
+		MaxPublicRepos:           cfg.Launch.MaxPublicReposPerUser,
+		RequirePrivatePlan:       cfg.Launch.RequirePrivateRepoPlan,
+		MaxPrivateRepos:          cfg.Launch.MaxPrivateReposPerUser,
+		PrivateRepoAllowed:       cfg.Launch.PrivateRepoAllowedUsers,
+		RequireVerifiedEmail:     envBool("ORCHARD_REQUIRE_VERIFIED_EMAIL"),
+		RequirePasskeyEnrollment: envBool("ORCHARD_REQUIRE_PASSKEY_ENROLLMENT"),
+		EnableOrganizations:      envBool("ORCHARD_ENABLE_ORGANIZATIONS"),
+		BootstrapSSHToken:        strings.TrimSpace(os.Getenv("ORCHARD_BOOTSTRAP_SSH_TOKEN")),
+
+	}
+	server := api.NewServerWithOptions(db, authSvc, repoSvc, serverOpts)
+	workerCtx, workerCancel := context.WithCancel(context.Background())
+	defer workerCancel()
+	if serverOpts.EnableAsyncIndexing {
+		if err := server.StartBackgroundWorkers(workerCtx); err != nil {
+			slog.Error("start background workers", "error", err)
+			os.Exit(1)
+		}
+		defer server.StopBackgroundWorkersNow()
+	}
+
+	httpServer := &http.Server{
+		Addr:         cfg.Addr(),
+		Handler:      server,
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 60 * time.Second,
+		IdleTimeout:  120 * time.Second,
+	}
+
+	// Graceful shutdown
+	done := make(chan os.Signal, 1)
+	signal.Notify(done, os.Interrupt)
+
+	go func() {
+		slog.Info("orchard listening", "addr", cfg.Addr())
+		if err := httpServer.ListenAndServe(); err != http.ErrServerClosed {
+			slog.Error("listen", "error", err)
+			os.Exit(1)
+		}
+	}()
+
+	<-done
+	slog.Info("shutting down")
+	workerCancel()
+	server.StopBackgroundWorkersNow()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	httpServer.Shutdown(ctx)
+}
+
+func cmdMigrate(args []string) {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
+
+	fs := flag.NewFlagSet("migrate", flag.ExitOnError)
+	configPath := fs.String("config", "", "path to config file")
+	fs.Parse(args)
+
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		slog.Error("load config", "error", err)
+		os.Exit(1)
+	}
+
+	db, err := openDB(cfg)
+	if err != nil {
+		slog.Error("open database", "error", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	if err := db.Migrate(context.Background()); err != nil {
+		slog.Error("migrate", "error", err)
+		os.Exit(1)
+	}
+	slog.Info("migrations complete")
+}
+
+func openDB(cfg *config.Config) (database.DB, error) {
+	switch cfg.Database.Driver {
+	case "sqlite":
+		return database.OpenSQLite(cfg.Database.DSN)
+	case "postgres":
+		return database.OpenPostgres(cfg.Database.DSN)
+	default:
+		return nil, fmt.Errorf("unsupported database driver: %s", cfg.Database.Driver)
+	}
+}
+
+func validateServeConfig(cfg *config.Config) error {
+	if cfg.Auth.JWTSecret == "" || cfg.Auth.JWTSecret == "change-me-in-production" {
+		return fmt.Errorf("ORCHARD_JWT_SECRET must be set to a non-default value (example: ORCHARD_JWT_SECRET=dev-jwt-secret-change-this)")
+	}
+	if len(cfg.Auth.JWTSecret) < 16 {
+		return fmt.Errorf("ORCHARD_JWT_SECRET must be at least 16 characters (current length: %d)", len(cfg.Auth.JWTSecret))
+	}
+	if cfg.Storage.Path == "" {
+		return fmt.Errorf("storage.path must be configured")
+	}
+	return nil
+}
+
+func parseAdminCIDRs(name string) []string {
+	return parseCSVEnv(name)
+}
+
+func trustedProxyCIDRs(cfg *config.Config) []string {
+	if cfg == nil {
+		return nil
+	}
+	cidrs := append([]string(nil), cfg.Server.TrustedProxies...)
+	if len(cidrs) > 0 {
+		return cidrs
+	}
+	if envBool("ORCHARD_TRUST_PROXY") {
+		return append(cidrs, legacyTrustAllProxyCIDRs...)
+	}
+	return cidrs
+}
+
+func parseCSVEnv(name string) []string {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		item := strings.TrimSpace(part)
+		if item == "" {
+			continue
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+func envInt(name string, fallback int) int {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value <= 0 {
+		return fallback
+	}
+	return value
+}
+
+func envDuration(name string, fallback time.Duration) time.Duration {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+	value, err := time.ParseDuration(raw)
+	if err != nil || value <= 0 {
+		return fallback
+	}
+	return value
+}

@@ -175,7 +175,7 @@ function isEntityBoundary(line: number, entities: EntityInfo[]): boolean {
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
-interface CodeViewerProps {
+export interface CodeViewerProps {
   source: string;
   owner?: string;
   repo?: string;
@@ -239,7 +239,7 @@ function CodeLine({
   return (
     <td
       className={cn(
-        'pr-8 pl-5 align-top whitespace-pre',
+        'pr-12 pl-5 align-top whitespace-pre',
         isHighlighted && 'bg-primary/10',
         isActiveEntity && !isHighlighted && 'bg-primary/5',
       )}
@@ -496,12 +496,12 @@ export function CodeViewer({
   }, [activeEntityKey, activeToken, entities]);
 
   return (
-    <div className="flex h-full overflow-hidden bg-[hsl(var(--code-bg))] text-[hsl(var(--code-fg))]">
+    <div className="flex h-full overflow-hidden bg-[hsl(var(--code-bg))] text-[hsl(var(--code-fg))] gap-px">
       {/* Code table */}
       <div
         ref={scrollContainerRef}
         onScroll={handleScroll}
-        className="flex-1 overflow-auto"
+        className="flex-1 overflow-auto pl-2"
       >
         <table
           className="w-full border-collapse text-sm font-mono bg-[hsl(var(--code-bg))]"
@@ -575,7 +575,7 @@ export function CodeViewer({
       {/* Code intelligence panel */}
       {showIntelPanel && (
         <div
-          className="w-72 shrink-0 border-l border-border/50 flex flex-col overflow-hidden bg-[hsl(var(--code-panel-bg))]"
+          className="w-96 shrink-0 border-l border-border/50 flex flex-col overflow-hidden bg-[hsl(var(--code-panel-bg))]"
         >
           <CodeIntelligencePanel
             activeToken={activeToken}

@@ -128,7 +128,7 @@ export default function PublicCodeBrowserPage() {
       <div className="flex flex-1 min-h-0">
         {isFile ? (
           isMarkdownFile(filename) ? (
-            <div className="flex-1 overflow-auto p-4 bg-card">
+            <div className="flex-1 overflow-auto px-8 py-4 bg-card">
               <MarkdownViewer filename={filename} source={source} />
             </div>
           ) : (

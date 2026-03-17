@@ -35,7 +35,7 @@ function shortHash(hash: string): string {
 
 function PanelSection({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div className="space-y-1.5">
+    <div className="space-y-1.5 overflow-x-auto">
       <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground px-1">
         {title}
       </div>
@@ -103,8 +103,8 @@ export function CodeIntelligencePanel({
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
-      <div className="flex items-center justify-between px-3 py-2 border-b border-border/50">
-        <div className="flex items-center gap-2 min-w-0">
+      <div className="flex items-center justify-between px-3 py-2 border-b border-border/50 overflow-x-auto">
+        <div className="flex items-center gap-2 min-w-0 overflow-hidden">
           <code className="font-mono text-sm text-foreground truncate">{symbolName}</code>
           {activeToken.kind && (
             <Badge variant="secondary" className="text-[10px] px-1.5 py-0 shrink-0">

@@ -14,9 +14,9 @@ import (
 	"github.com/odvcencio/graft/pkg/object"
 	"github.com/odvcencio/orchard/internal/graftstore"
 	"github.com/odvcencio/orchard/internal/models"
-	"github.com/odvcencio/gts-suite/pkg/index"
-	"github.com/odvcencio/gts-suite/pkg/structdiff"
-	"github.com/odvcencio/gts-suite/pkg/xref"
+	"github.com/odvcencio/canopy/pkg/index"
+	"github.com/odvcencio/canopy/pkg/structdiff"
+	"github.com/odvcencio/canopy/pkg/xref"
 )
 
 type MergeGateResult struct {

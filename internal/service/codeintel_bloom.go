@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	"github.com/odvcencio/orchard/internal/models"
-	"github.com/odvcencio/gts-suite/pkg/model"
+	"github.com/odvcencio/canopy/pkg/model"
 )
 
 const (

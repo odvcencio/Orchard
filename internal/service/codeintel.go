@@ -18,10 +18,10 @@ import (
 	"github.com/odvcencio/orchard/internal/database"
 	"github.com/odvcencio/orchard/internal/graftstore"
 	"github.com/odvcencio/orchard/internal/models"
-	"github.com/odvcencio/gts-suite/pkg/index"
-	"github.com/odvcencio/gts-suite/pkg/model"
-	"github.com/odvcencio/gts-suite/pkg/query"
-	"github.com/odvcencio/gts-suite/pkg/xref"
+	"github.com/odvcencio/canopy/pkg/index"
+	"github.com/odvcencio/canopy/pkg/model"
+	"github.com/odvcencio/canopy/pkg/query"
+	"github.com/odvcencio/canopy/pkg/xref"
 )
 
 const (
@@ -114,7 +114,7 @@ func (h *codeIntelBloomAccessHeap) Pop() any {
 	return entry
 }
 
-// CodeIntelService provides code intelligence powered by gts-suite.
+// CodeIntelService provides code intelligence powered by canopy.
 type CodeIntelService struct {
 	db        database.DB
 	repoSvc   *RepoService
@@ -1409,7 +1409,7 @@ func collectDirectCallersFromGraph(graph xref.Graph, defs []xref.Definition) []I
 	callersByID := make(map[string]ImpactDirectCaller)
 	for _, d := range defs {
 		edges := graph.IncomingEdges(d.ID)
-		for _, edge := range edges {
+		for _, edge := range graph.MaterializeEdges(edges) {
 			callerID := strings.TrimSpace(edge.Caller.ID)
 			if callerID == "" {
 				continue
@@ -1452,8 +1452,9 @@ func (s *CodeIntelService) persistXRefGraph(ctx context.Context, repoID int64, c
 		})
 	}
 
-	edges := make([]models.XRefEdge, 0, len(graph.Edges))
-	for _, edge := range graph.Edges {
+	materializedEdges := graph.MaterializeEdges(graph.Edges)
+	edges := make([]models.XRefEdge, 0, len(materializedEdges))
+	for _, edge := range materializedEdges {
 		sourceFile := edge.Caller.File
 		sourceLine := 0
 		if len(edge.Samples) > 0 {
@@ -1575,8 +1576,9 @@ func (s *CodeIntelService) GetCallGraph(ctx context.Context, owner, repo, ref, s
 
 	walk := graph.Walk(ids, depth, reverse)
 
+	materializedEdges := walk.MaterializedEdges()
 	var edges []CallEdge
-	for _, e := range walk.Edges {
+	for _, e := range materializedEdges {
 		edges = append(edges, CallEdge{
 			CallerName: e.Caller.Name,
 			CallerFile: e.Caller.File,

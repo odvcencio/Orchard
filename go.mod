@@ -1,6 +1,6 @@
 module github.com/odvcencio/orchard
 
-go 1.25
+go 1.25.0
 
 require (
 	github.com/go-webauthn/webauthn v0.13.4
@@ -8,9 +8,9 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.8.0
 	github.com/klauspost/compress v1.18.4
-	github.com/odvcencio/gotreesitter v0.6.1-0.20260306002001-fbe5983c6f41
+	github.com/odvcencio/canopy v0.15.0
+	github.com/odvcencio/gotreesitter v0.13.0
 	github.com/odvcencio/graft v0.2.6-0.20260304063020-bf17b7cc5d5d
-	github.com/odvcencio/gts-suite v0.5.0
 	github.com/prometheus/client_golang v1.23.2
 	go.opentelemetry.io/otel v1.40.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.40.0
@@ -25,7 +25,12 @@ require (
 // Use the active local gotreesitter branch during parity work.
 replace github.com/odvcencio/gotreesitter => /home/draco/work/gotreesitter
 
+replace github.com/odvcencio/canopy => ../canopy
+
+replace github.com/odvcencio/graft => ../graft
+
 require (
+	github.com/BurntSushi/toml v1.6.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect

@@ -12,9 +12,9 @@ import (
 	"github.com/odvcencio/orchard/internal/database"
 	"github.com/odvcencio/orchard/internal/graftstore"
 	"github.com/odvcencio/orchard/internal/models"
-	"github.com/odvcencio/gts-suite/pkg/model"
-	"github.com/odvcencio/gts-suite/pkg/query"
-	"github.com/odvcencio/gts-suite/pkg/xref"
+	"github.com/odvcencio/canopy/pkg/model"
+	"github.com/odvcencio/canopy/pkg/query"
+	"github.com/odvcencio/canopy/pkg/xref"
 )
 
 var (
@@ -411,15 +411,15 @@ func benchmarkImpactGraph(definitionCount, fanIn int) xref.Graph {
 
 	edges := make([]xref.Edge, 0, definitionCount*fanIn)
 	for i := 0; i < definitionCount; i++ {
-		callee := defs[i]
+		calleeIdx := i
 		for j := 1; j <= fanIn; j++ {
-			caller := defs[(i+j)%definitionCount]
-			if caller.ID == callee.ID {
+			callerIdx := (i + j) % definitionCount
+			if defs[callerIdx].ID == defs[calleeIdx].ID {
 				continue
 			}
 			edges = append(edges, xref.Edge{
-				Caller:     caller,
-				Callee:     callee,
+				CallerIdx:  callerIdx,
+				CalleeIdx:  calleeIdx,
 				Resolution: "static",
 				Count:      1 + (j % 3),
 			})

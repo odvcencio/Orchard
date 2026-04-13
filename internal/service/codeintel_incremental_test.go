@@ -8,7 +8,7 @@ import (
 	"github.com/odvcencio/graft/pkg/object"
 	"github.com/odvcencio/orchard/internal/graftstore"
 	"github.com/odvcencio/orchard/internal/models"
-	"github.com/odvcencio/gts-suite/pkg/model"
+	"github.com/odvcencio/canopy/pkg/model"
 )
 
 func TestEnsureCommitIndexedIncrementalParsesChangedFilesOnly(t *testing.T) {
